@@ -1,5 +1,5 @@
 streamlit
-google-genai
+google-generativeai>=0.5.4
 pandas
 pillow
 pytesseract
