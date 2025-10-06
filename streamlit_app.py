@@ -1,5 +1,5 @@
 import streamlit as st
-import google.generativeai as genai
+import google_genai as genai
 from PIL import Image
 import pytesseract
 import io
