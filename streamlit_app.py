@@ -1,10 +1,47 @@
 import streamlit as st
-import google.generativeai as genai # Final simplified import
+
+# --- CRITICAL FIX FOR STREAMLIT CLOUD NAMESPACE CONFLICT ---
+import sys
+import os
+
+try:
+    # 1. Try the standard import first (best practice)
+    import google.generativeai as genai
+except ImportError:
+    # 2. If it fails, force Python to look in the exact package folder.
+    # This requires knowing the package structure, but is the most reliable workaround.
+    try:
+        # Assuming the environment uses the standard venv path structure
+        # We need the path to the 'generativeai' module inside the 'google' folder
+        site_packages_path = next(p for p in sys.path if 'site-packages' in p)
+        gemini_path = os.path.join(site_packages_path, 'google', 'generativeai')
+        
+        if os.path.exists(gemini_path):
+            sys.path.append(gemini_path)
+            # This should now allow a direct import of the module by its name
+            # NOTE: For the final version, simply using 'import google.generativeai as genai' 
+            # might work after the sys.path modification, but we try a direct relative import 
+            # if the environment is hostile. The original name often magically works now.
+            import google.generativeai as genai
+            st.success("Module path fixed and GenAI SDK imported.")
+        else:
+            raise ImportError(f"Cannot find expected Gemini SDK path: {gemini_path}")
+            
+    except Exception as e:
+        # If the path fix fails, stop the app.
+        st.error("FATAL ERROR: Failed to import the Google GenAI SDK.")
+        st.info(f"Persistent environment issue. Details: {e}")
+        st.exception(e)
+        st.stop()
+# --- END OF CRITICAL FIX ---
+
+
 from PIL import Image
 import pytesseract
 import io
 import pandas as pd
 from pdf2image import convert_from_bytes
+# ... (rest of your imports and functions remain the same)
 import os
 from io import StringIO
 import re # For cleaning up API output
