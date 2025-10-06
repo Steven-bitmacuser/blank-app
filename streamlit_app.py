@@ -9,6 +9,7 @@ import shutil
 from io import StringIO
 from PIL import Image
 import pandas as pd
+from typing import List, Tuple
 
 # ==========  IMPORT GOOGLE GENERATIVE AI (official package) ==========
 try:
@@ -24,8 +25,8 @@ except Exception as e:
 
 # ========== STREAMLIT PAGE CONFIG ==========
 st.set_page_config(page_title="IGCSE/A-level Auto-Marker AI", layout="wide", page_icon="🤌")
-st.title("IGCSE/A-level Auto-Marker AI (V4) - Fixed CSV Logic & Display")
-st.write("Upload student's paper and mark scheme (images or PDF). This version includes improved CSV validation, normalization, and a more honest sureness score.")
+st.title("IGCSE/A-level Auto-Marker AI (V4) - Final Sorted & Fixed")
+st.write("Upload student's paper and mark scheme (images or PDF). This version includes improved CSV validation, normalization, and **reliable natural sorting by question number.**")
 
 # ========= Sidebar: Uploads and Options ==========
 st.sidebar.header("1) Upload Files")
@@ -128,7 +129,6 @@ GEMINI_MODEL = "gemini-2.5-flash"
 def build_marking_prompt(student_text, scheme_text, expected_full_marks):
     """
     Build a strict prompt that forces CSV output and requires the sum of Maximum_Marks to equal expected_full_marks.
-    FIX: Added explicit instruction to quote the Detailed_Feedback column to prevent commas from breaking CSV.
     """
     prompt = f"""
 You are a professional IGCSE/A-level examiner. Your job is to mark the student's paper strictly using the following mark scheme.
@@ -142,7 +142,7 @@ REQUIREMENTS (MUST FOLLOW EXACTLY):
 6. Do NOT include any "Total" or "Summary" rows. Only question rows.
 7. Detailed_Feedback must be 1-2 concise sentences explaining why marks were awarded or not. **CRITICAL: This field MUST be enclosed in double quotation marks (")** to ensure the CSV structure is not corrupted by commas within the feedback text.
 
-Now produce the CSV table only.
+Now produce the CSV table only. The sorting will be handled by the application, so focus on accuracy.
 
 [STUDENT'S PAPER]
 {student_text}
@@ -252,6 +252,22 @@ def parse_marking_csv_text(csv_text):
     except Exception as e:
         return None, f"CSV parse error: {e}"
 
+# ========== Helper: Natural Sort Key for Alphanumeric Sorting (NEW) ==========
+def natural_sort_key(s: str) -> List[Tuple]:
+    """
+    Sort function to correctly handle alphanumeric strings like 1, 1a, 1b, 2, 2a.
+    It splits the string into number and non-number parts.
+    Example: '1b' -> [(0, 1), (1, 'b')]
+             '10a' -> [(0, 10), (1, 'a')]
+    """
+    if pd.isna(s):
+        return [(0, 0)] # Put NaNs at the beginning/end
+        
+    s = str(s).strip()
+    # Regex to find consecutive digits (d+) or non-digits (D+)
+    return [(int(c), '') if c.isdigit() else (0, c) 
+            for c in re.split('([0-9]+)', s) if c]
+
 # ========== Improved sureness score ==========
 def calculate_sureness_score(df, raw_output, expected_full_marks):
     """
@@ -352,7 +368,6 @@ if st.button("✨ Mark Paper"):
                     st.stop()
 
                 # Coerce numeric and fill NaN marks with 0 to avoid errors
-                # Store the original data before potential normalization for sureness score calculation
                 df['Marks_Awarded_Raw'] = df['Marks_Awarded'].copy()
                 df['Maximum_Marks_Raw'] = df['Maximum_Marks'].copy()
                 
@@ -370,7 +385,6 @@ if st.button("✨ Mark Paper"):
                         # scale factor for Maximum_Marks and Marks_Awarded proportionally
                         if total_max > 0:
                             factor = expected_full_marks / total_max
-                            # Add original columns if normalization is done
                             if 'Maximum_Marks_Original' not in df.columns:
                                 df['Maximum_Marks_Original'] = df['Maximum_Marks_Raw']
                                 df['Marks_Awarded_Original'] = df['Marks_Awarded_Raw']
@@ -389,6 +403,14 @@ if st.button("✨ Mark Paper"):
                 df['Marks_Awarded'] = pd.to_numeric(df['Marks_Awarded'], errors='coerce').fillna(0).astype(int)
                 df['Maximum_Marks'] = pd.to_numeric(df['Maximum_Marks'], errors='coerce').fillna(0).astype(int)
 
+                # =========================================================================
+                # >> FIX: APPLY NATURAL SORTING HERE <<
+                # =========================================================================
+                # Apply the natural_sort_key to the Question_Number column
+                df['sort_key'] = df['Question_Number'].apply(natural_sort_key)
+                df = df.sort_values(by='sort_key', ignore_index=True)
+                df = df.drop(columns='sort_key') # Drop the temporary sorting column
+                
                 # Calculate sureness score (use raw/original columns for this)
                 sureness = calculate_sureness_score(df.copy(), raw_csv_text, expected_full_marks)
 
@@ -396,11 +418,9 @@ if st.button("✨ Mark Paper"):
                 cols_to_drop = [col for col in ['Marks_Awarded_Raw', 'Maximum_Marks_Raw'] if col in df.columns]
                 df = df.drop(columns=cols_to_drop, errors='ignore')
 
-                # =========================================================================
-                # >> FIX: Column Reordering and Text Wrapping for Display <<
-                # =========================================================================
                 
                 # 1. Define preferred column order for display
+                # Order is: Question_Number, Marks_Awarded, Maximum_Marks, Detailed_Feedback
                 display_cols = ['Question_Number', 'Marks_Awarded', 'Maximum_Marks', 'Detailed_Feedback']
 
                 # Reorder the DataFrame columns for display
@@ -437,10 +457,10 @@ if st.button("✨ Mark Paper"):
                     unsafe_allow_html=True
                 )
                 
-                # 4. Show the reordered table using the custom-styled st.dataframe
+                # 4. Show the reordered and sorted table
                 try:
                     st.dataframe(
-                        df_display, # Use the reordered df_display
+                        df_display, # Use the sorted and reordered df_display
                         use_container_width=True,
                         height=500
                     )
@@ -459,9 +479,6 @@ if st.button("✨ Mark Paper"):
 
                 if debug_mode:
                     st.subheader("Debug information")
-                    st.write("Call logs:")
-                    for l in call_logs:
-                        st.text(l)
                     st.write("Raw AI output preview:")
                     st.code(raw_csv_text[:4000])
 
