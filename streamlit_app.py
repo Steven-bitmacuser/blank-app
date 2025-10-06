@@ -1,19 +1,13 @@
 import streamlit as st
 
-# --- ULTIMATE FIX FOR NAMESPACE CONFLICT (Uses a fallback for robustness) ---
-# The standard import usually works when the environment is correctly configured with secrets.
 try:
     import google.generativeai as genai
-except ImportError:
-    # Fallback to the snake_case name, which sometimes bypasses namespace issues.
-    try:
-        import google_genai as genai
-    except ImportError as e:
-        st.error("FATAL ERROR: The Google GenAI SDK cannot be imported.")
-        st.info("Please ensure 'google-genai' is listed in your requirements.txt.")
-        st.exception(e)
-        st.stop()
-# --- END OF ULTIMATE FIX ---
+except ImportError as e:
+    st.error("❌ The Google Generative AI SDK could not be imported.")
+    st.info("Please ensure 'google-generativeai' is in your requirements.txt (not 'google-genai').")
+    st.exception(e)
+    st.stop()
+
 
 from PIL import Image
 import pytesseract
