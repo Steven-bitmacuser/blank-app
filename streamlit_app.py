@@ -396,22 +396,57 @@ if st.button("✨ Mark Paper"):
                 cols_to_drop = [col for col in ['Marks_Awarded_Raw', 'Maximum_Marks_Raw'] if col in df.columns]
                 df = df.drop(columns=cols_to_drop, errors='ignore')
 
-                # Display report
+                # =========================================================================
+                # >> FIX: Column Reordering and Text Wrapping for Display <<
+                # =========================================================================
+                
+                # 1. Define preferred column order for display
+                display_cols = ['Question_Number', 'Marks_Awarded', 'Maximum_Marks', 'Detailed_Feedback']
+                df_display = df[display_cols]
+
+                # 2. Display report
                 st.header("Marking Report")
                 col1, col2 = st.columns([1, 3])
                 col1.metric("Sureness Score", f"{sureness}/100")
                 col2.metric("Total Score", f"{int(df['Marks_Awarded'].sum())} / {int(df['Maximum_Marks'].sum())}")
 
                 st.markdown("---")
-                # Show table with wrap for feedback
+                
+                # 3. Apply custom CSS to enforce text wrapping in Streamlit DataFrames
+                st.markdown(
+                    """
+                    <style>
+                    /* Target the DataFrame elements for text wrapping */
+                    .stDataFrame div[data-testid="stDataframeCell"] {
+                        white-space: normal !important;
+                        word-break: break-word;
+                    }
+                    /* Ensure headers align correctly with wrapped text */
+                    .stDataFrame div[data-testid="stDataframeHeader"] {
+                        white-space: normal !important;
+                    }
+                    /* Increase row height for better wrapped display */
+                    .stDataFrame .data-row {
+                        height: auto !important;
+                        min-height: 50px; /* Minimum height for rows */
+                    }
+                    </style>
+                    """,
+                    unsafe_allow_html=True
+                )
+                
+                # 4. Show the reordered table
                 try:
                     st.dataframe(
-                        df,
+                        df_display, # Use the reordered DataFrame
                         use_container_width=True,
                         height=500
                     )
-                except Exception:
-                    st.write(df)
+                except Exception as e:
+                    st.error(f"Error displaying DataFrame: {e}")
+                    st.write(df_display) # Fallback to st.write
+                
+                # =========================================================================
 
                 # Provide raw outputs & download options
                 st.markdown("---")
