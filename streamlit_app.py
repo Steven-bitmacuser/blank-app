@@ -23,7 +23,7 @@ except Exception as e:
     st.stop()
 
 # ========== STREAMLIT PAGE CONFIG ==========
-st.set_page_config(page_title="IGCSE/A-level Auto-Marker AI", layout="wide", page_icon="🧠")
+st.set_page_config(page_title="IGCSE/A-level Auto-Marker AI", layout="wide", page_icon="🤌")
 st.title("IGCSE/A-level Auto-Marker AI (V4)")
 st.write("Upload student's paper and mark scheme (images or PDF). This version includes improved CSV validation, normalization, and a more honest sureness score.")
 
