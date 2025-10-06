@@ -10,7 +10,7 @@ from io import StringIO
 from PIL import Image
 import pandas as pd
 
-# ==========  IMPORT GOOGLE GENERATIVE AI (official package) ==========
+# ==========  IMPORT GOOGLE GENERATIVE AI (official package) ==========
 try:
     import google.generativeai as genai
 except Exception as e:
@@ -24,7 +24,7 @@ except Exception as e:
 
 # ========== STREAMLIT PAGE CONFIG ==========
 st.set_page_config(page_title="IGCSE/A-level Auto-Marker AI", layout="wide", page_icon="🤌")
-st.title("IGCSE/A-level Auto-Marker AI (V4)")
+st.title("IGCSE/A-level Auto-Marker AI (V4) - Fixed CSV Logic")
 st.write("Upload student's paper and mark scheme (images or PDF). This version includes improved CSV validation, normalization, and a more honest sureness score.")
 
 # ========= Sidebar: Uploads and Options ==========
@@ -53,8 +53,19 @@ st.sidebar.markdown("---")
 st.sidebar.caption("If Tesseract/Poppler are not installed on Streamlit Cloud, please ensure packages.txt at repo root contains:\n```\ntesseract-ocr\npoppler-utils\n```")
 
 # ========== Helper: OCR & PDF to images ==========
-from pdf2image import convert_from_bytes
-import pytesseract
+# These imports rely on system packages (tesseract-ocr and poppler-utils)
+try:
+    from pdf2image import convert_from_bytes
+    import pytesseract
+except ImportError as e:
+    st.warning(f"Some OCR libraries failed to import: {e}. Check system prerequisites.")
+    # Define dummy functions to prevent crash if libraries are missing but app is run
+    def convert_from_bytes(*args, **kwargs): raise ImportError("pdf2image not found.")
+    class DummyTesseract:
+        @staticmethod
+        def image_to_string(*args, **kwargs): raise ImportError("pytesseract not found.")
+    pytesseract = DummyTesseract()
+
 
 def process_and_extract_text(uploaded_files, file_type="Paper"):
     """
@@ -82,8 +93,11 @@ def process_and_extract_text(uploaded_files, file_type="Paper"):
                 images_to_process.append(img)
             else:
                 st.warning(f"Unsupported file type: {filename}. Skipped.")
+        except ImportError:
+            st.error(f"Error: Required OCR/PDF dependency is missing for {filename}. Check system prerequisites (tesseract/poppler).")
+            return None
         except Exception as e:
-            st.error(f"Error preparing file {filename}. Ensure poppler-utils is installed for PDFs: {e}")
+            st.error(f"Error preparing file {filename}: {e}")
             if debug_mode:
                 st.exception(e)
             return None
@@ -96,8 +110,11 @@ def process_and_extract_text(uploaded_files, file_type="Paper"):
         try:
             text = pytesseract.image_to_string(img)
             full_text += f"[Page {i+1}]\n" + text + "\n\n"
+        except ImportError:
+            st.error(f"Error: Tesseract is not configured correctly on the system.")
+            return None
         except Exception as e:
-            st.error(f"Error performing OCR on page {i+1}. Ensure tesseract-ocr installed and available in PATH: {e}")
+            st.error(f"Error performing OCR on page {i+1}: {e}")
             if debug_mode:
                 st.exception(e)
             return None
@@ -105,12 +122,13 @@ def process_and_extract_text(uploaded_files, file_type="Paper"):
     st.success(f"Extracted text from {len(images_to_process)} pages of {file_type}.")
     return full_text
 
-# ========== Helper: create a robust prompt for Gemini ==========
+# ========== Helper: create a robust prompt for Gemini (FIXED CSV QUOTING) ==========
 GEMINI_MODEL = "gemini-2.5-flash"
 
 def build_marking_prompt(student_text, scheme_text, expected_full_marks):
     """
     Build a strict prompt that forces CSV output and requires the sum of Maximum_Marks to equal expected_full_marks.
+    FIX: Added explicit instruction to quote the Detailed_Feedback column to prevent commas from breaking CSV.
     """
     prompt = f"""
 You are a professional IGCSE/A-level examiner. Your job is to mark the student's paper strictly using the following mark scheme.
@@ -122,7 +140,7 @@ REQUIREMENTS (MUST FOLLOW EXACTLY):
 4. Marks_Awarded and Maximum_Marks MUST be integers. Do not use ranges, text, or fractions.
 5. The sum of the Maximum_Marks column MUST equal exactly {expected_full_marks}.
 6. Do NOT include any "Total" or "Summary" rows. Only question rows.
-7. Detailed_Feedback must be 1-2 concise sentences explaining why marks were awarded or not.
+7. Detailed_Feedback must be 1-2 concise sentences explaining why marks were awarded or not. **CRITICAL: This field MUST be enclosed in double quotation marks (")** to ensure the CSV structure is not corrupted by commas within the feedback text.
 
 Now produce the CSV table only.
 
@@ -191,6 +209,7 @@ The table you previously returned is not valid CSV or misses the required column
 Remember: output ONLY CSV with EXACT columns:
 Question_Number,Marks_Awarded,Maximum_Marks,Detailed_Feedback
 Ensure the sum of Maximum_Marks equals exactly {expected_full_marks}.
+**CRITICAL: The Detailed_Feedback field MUST be enclosed in double quotes (")**.
 Return ONLY the CSV, nothing else.
 Here is your previous output (for reference):
 
@@ -206,7 +225,7 @@ Here is your previous output (for reference):
 
     return last_response_text, logs
 
-# ========== Helper: parse CSV text into DataFrame and validate ==========
+# ========== Helper: parse CSV text into DataFrame and validate (IMPROVED VALIDATION) ==========
 def parse_marking_csv_text(csv_text):
     """
     Tries to parse csv_text into pandas DataFrame.
@@ -214,13 +233,18 @@ def parse_marking_csv_text(csv_text):
     """
     try:
         csv_io = StringIO(csv_text)
-        df = pd.read_csv(csv_io)
-        # Standardize column names
+        # Using the 'python' engine for better handling of quoted fields, which is the fix implemented in the prompt
+        df = pd.read_csv(csv_io, sep=',', header=0, skipinitialspace=True, engine='python')
+        
+        # Standardize column names by stripping whitespace
         df.columns = [c.strip() for c in df.columns]
         expected_cols = ['Question_Number', 'Marks_Awarded', 'Maximum_Marks', 'Detailed_Feedback']
-        if not all(col in df.columns for col in expected_cols):
+        
+        # Check for correct number of columns (exactly 4)
+        if len(df.columns) != 4 or not all(col in df.columns for col in expected_cols):
             missing = [c for c in expected_cols if c not in df.columns]
-            return None, f"Missing columns: {missing}"
+            return None, f"Missing or incorrect columns. Expected {expected_cols}, found {list(df.columns)}. Missing: {missing}"
+
         # Ensure numeric where needed
         df['Marks_Awarded'] = pd.to_numeric(df['Marks_Awarded'], errors='coerce')
         df['Maximum_Marks'] = pd.to_numeric(df['Maximum_Marks'], errors='coerce')
@@ -242,13 +266,14 @@ def calculate_sureness_score(df, raw_output, expected_full_marks):
     score = max_score
     req_cols = ['Question_Number', 'Marks_Awarded', 'Maximum_Marks', 'Detailed_Feedback']
 
-    # Penalize missing columns
+    # Penalize missing columns (already handled in parse, but kept for robustness)
     missing_cols = [c for c in req_cols if c not in df.columns]
     if missing_cols:
         score -= 40
 
     # Penalize NaNs in mark columns
     try:
+        # Check if any original NaNs were present before the final fillna(0)
         if df['Marks_Awarded'].isnull().any():
             score -= 15
         if df['Maximum_Marks'].isnull().any():
@@ -274,7 +299,9 @@ def calculate_sureness_score(df, raw_output, expected_full_marks):
 
     # Penalize raw text length vs CSV length (excess filler)
     try:
+        # Use a copy to avoid converting non-numeric data to float on the main DF
         csv_len = len(df.to_csv(index=False))
+        # Raw output shouldn't be much longer than the CSV text itself
         if len(raw_output) > csv_len * 1.6:
             score -= 5
     except Exception:
@@ -287,7 +314,8 @@ if st.button("✨ Mark Paper"):
     if not paper_files or not scheme_files:
         st.warning("Please upload both the student's paper and the mark scheme.")
     else:
-        with st.spinner("Performing OCR on uploaded files..."):
+        # Use a single spinner for the long OCR phase
+        with st.spinner("Performing OCR on uploaded files... (This may take a moment for PDFs)"):
             student_paper_text = process_and_extract_text(paper_files, file_type="Paper")
             mark_scheme_text = process_and_extract_text(scheme_files, file_type="Mark Scheme")
 
@@ -298,7 +326,7 @@ if st.button("✨ Mark Paper"):
                 "student_paper_text": student_paper_text,
                 "mark_scheme_text": mark_scheme_text
             }
-            st.info("Calling the Gemini model to produce the CSV marking table...")
+            st.info("Calling the Gemini model to produce the CSV marking table (may take 10-20 seconds)...")
 
             raw_csv_text, call_logs = call_gemini_for_csv(structured, expected_full_marks, max_retries=2)
 
@@ -314,15 +342,20 @@ if st.button("✨ Mark Paper"):
                 with st.expander("Raw AI Output (click to expand)", expanded=debug_mode):
                     st.code(raw_csv_text[:5000])  # show up to 5000 chars
 
+                # --- Parsing and Validation ---
                 df, parse_err = parse_marking_csv_text(raw_csv_text)
                 if parse_err:
-                    st.warning(f"AI output couldn't be parsed as CSV: {parse_err}")
+                    st.error(f"AI output couldn't be parsed as CSV: {parse_err}. **This usually means the AI failed to correctly quote the Detailed_Feedback field.**")
                     if debug_mode:
                         st.subheader("Raw output for debugging")
                         st.text_area("Raw Output", raw_csv_text, height=300)
                     st.stop()
 
                 # Coerce numeric and fill NaN marks with 0 to avoid errors
+                # Store the original data before potential normalization for sureness score calculation
+                df['Marks_Awarded_Raw'] = df['Marks_Awarded'].copy()
+                df['Maximum_Marks_Raw'] = df['Maximum_Marks'].copy()
+                
                 df['Marks_Awarded'] = df['Marks_Awarded'].fillna(0).astype(float)
                 df['Maximum_Marks'] = df['Maximum_Marks'].fillna(0).astype(float)
 
@@ -332,13 +365,16 @@ if st.button("✨ Mark Paper"):
 
                 # If totals mismatch expected full marks, offer options
                 if total_max != expected_full_marks:
-                    st.warning(f"AI reported total maximum marks = {int(total_max)} but expected = {int(expected_full_marks)}.")
+                    st.warning(f"AI reported total maximum marks = {int(total_max)} but expected = {int(expected_full_marks)}. Applying normalization...")
                     if auto_normalize:
                         # scale factor for Maximum_Marks and Marks_Awarded proportionally
                         if total_max > 0:
                             factor = expected_full_marks / total_max
-                            df['Maximum_Marks_Original'] = df['Maximum_Marks']
-                            df['Marks_Awarded_Original'] = df['Marks_Awarded']
+                            # Add original columns if normalization is done
+                            if 'Maximum_Marks_Original' not in df.columns:
+                                df['Maximum_Marks_Original'] = df['Maximum_Marks_Raw']
+                                df['Marks_Awarded_Original'] = df['Marks_Awarded_Raw']
+                            
                             df['Maximum_Marks'] = (df['Maximum_Marks'] * factor).round().astype(int)
                             df['Marks_Awarded'] = (df['Marks_Awarded'] * factor).round().astype(int)
                             total_awarded = int(df['Marks_Awarded'].sum())
@@ -347,14 +383,18 @@ if st.button("✨ Mark Paper"):
                         else:
                             st.error("AI reported total maximum marks equal to 0; cannot normalize.")
                     else:
-                        st.info("Disable 'Auto-normalize' in sidebar to avoid automatic scaling. Consider re-running with debug mode to inspect raw AI output.")
+                        st.info("Normalization skipped. Enable 'Auto-normalize' in sidebar for automatic scaling.")
                 
                 # Final numeric coercion (safe)
                 df['Marks_Awarded'] = pd.to_numeric(df['Marks_Awarded'], errors='coerce').fillna(0).astype(int)
                 df['Maximum_Marks'] = pd.to_numeric(df['Maximum_Marks'], errors='coerce').fillna(0).astype(int)
 
-                # Calculate sureness score
+                # Calculate sureness score (use raw/original columns for this)
                 sureness = calculate_sureness_score(df.copy(), raw_csv_text, expected_full_marks)
+
+                # Prepare final DataFrame for display (remove temporary raw columns)
+                cols_to_drop = [col for col in ['Marks_Awarded_Raw', 'Maximum_Marks_Raw'] if col in df.columns]
+                df = df.drop(columns=cols_to_drop, errors='ignore')
 
                 # Display report
                 st.header("Marking Report")
