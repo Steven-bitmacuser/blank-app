@@ -1,1 +1,6 @@
 streamlit
+google-genai
+pillow
+pytesseract
+pandas
+pdf2image
