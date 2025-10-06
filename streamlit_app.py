@@ -1,19 +1,35 @@
 import streamlit as st
-import google.generativeai as genai
+
+# --- ModuleNotFoundError Fix for Streamlit Cloud ---
+# The standard 'import google.generativeai as genai' fails in this environment.
+# We use a try-except block to force the absolute import path, which is more reliable.
+try:
+    import google.generativeai as genai
+except ImportError:
+    try:
+        from google import generativeai as genai
+    except ImportError as e:
+        # If both fail, we stop the app and display a critical error
+        st.error("FATAL ERROR: Failed to import the Google GenAI SDK.")
+        st.info("Please ensure 'google-genai' is listed in your requirements.txt and verify your Streamlit Cloud environment.")
+        st.exception(e)
+        st.stop()
+# --- End of Fix ---
+
 from PIL import Image
 import pytesseract
 import io
 import pandas as pd
-from pdf2image import convert_from_bytes 
-import os 
+from pdf2image import convert_from_bytes
+import os
 from io import StringIO
 import re # For cleaning up API output
 import time # For time-based uniqueness (optional, but good practice)
 
 # --- Configuration ---
-# 🔑 Hardcode your API key here. It will be exposed in your code.
-# REPLACE 'YOUR_HARDCODED_GEMINI_API_KEY_HERE' with your actual key.
-HARDCODED_API_KEY = "AIzaSyA_U1-epz5hS9wF5mydEMe_Ij0mfzaWsk4"
+# 🔑 SECURITY NOTE: This key is exposed in your code. For production, use Streamlit Secrets.
+# Please replace the placeholder with your actual key before deploying.
+HARDCODED_API_KEY = "REPLACE_WITH_YOUR_ACTUAL_GEMINI_API_KEY"
 GEMINI_MODEL = 'gemini-2.5-flash' # Stable and fast model
 
 # --- Helper Functions: OCR and Extraction ---
@@ -92,10 +108,14 @@ def calculate_sureness_score(df, raw_output):
         
     # Penalty 2: Data type issues (API didn't strictly follow CSV rules)
     try:
-        if df['Marks_Awarded'].isnull().any() or df['Maximum_Marks'].isnull().any():
+        # Check if the columns exist first
+        if 'Marks_Awarded' in df.columns and df['Marks_Awarded'].isnull().any():
+             score -= 20
+        if 'Maximum_Marks' in df.columns and df['Maximum_Marks'].isnull().any():
              score -= 20
     except Exception:
-         score -= 20
+        # Catch-all for unexpected column or data type errors
+        score -= 20 
 
     # Penalty 3: Low number of rows (suggests incomplete marking)
     if df.shape[0] < 3: 
@@ -114,8 +134,8 @@ def get_marking_from_gemini(content):
     """Calls the Gemini API to get the structured marking data."""
     api_key = HARDCODED_API_KEY 
 
-    if not api_key or api_key == "YOUR_HARDCODED_GEMINI_API_KEY_HERE":
-        st.error("Gemini API key is not configured in the script.")
+    if not api_key or api_key == "REPLACE_WITH_YOUR_ACTUAL_GEMINI_API_KEY":
+        st.error("Gemini API key is not configured in the script or is using the placeholder.")
         return None
         
     try:
@@ -161,7 +181,7 @@ def get_marking_from_gemini(content):
 
 # --- Streamlit UI ---
 st.set_page_config(page_title="IGCSE and A-level Auto-Marker AI", layout="wide")
-st.title(" IGCSE/A-level Auto-Marker AI")
+st.title("👨‍🏫 IGCSE/A-level Auto-Marker AI")
 st.write("Upload an exam paper and its mark scheme (Images or PDF) to get an automated, detailed marking report.")
 st.write("BEWARE!!! The images/PDFs needed to be horizontally aligned for better OCR results.")
 st.sidebar.header("Upload Files")
@@ -174,7 +194,7 @@ if st.sidebar.button("✨ Mark Paper"):
         st.warning("Please upload both the paper and the mark scheme files.")
     else:
         # Pre-check for API key before processing large files
-        if HARDCODED_API_KEY == "YOUR_HARDCODED_GEMINI_API_KEY_HERE":
+        if HARDCODED_API_KEY == "REPLACE_WITH_YOUR_ACTUAL_GEMINI_API_KEY":
             st.error("Please set your Gemini API key in the `HARDCODED_API_KEY` variable at the top of the script.")
             st.stop()
             
@@ -197,6 +217,7 @@ if st.sidebar.button("✨ Mark Paper"):
                     marking_df['Maximum_Marks'] = pd.to_numeric(marking_df['Maximum_Marks'], errors='coerce')
 
                     # Calculate Sureness Score
+                    # A .copy() is used as a safety measure for the function input
                     sureness_score = calculate_sureness_score(marking_df.copy(), marking_csv_data)
 
                     st.header("Marking Report")
