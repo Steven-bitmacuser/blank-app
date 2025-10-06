@@ -10,7 +10,7 @@ from io import StringIO
 from PIL import Image
 import pandas as pd
 
-# ==========  IMPORT GOOGLE GENERATIVE AI (official package) ==========
+# ==========  IMPORT GOOGLE GENERATIVE AI (official package) ==========
 try:
     import google.generativeai as genai
 except Exception as e:
@@ -24,7 +24,7 @@ except Exception as e:
 
 # ========== STREAMLIT PAGE CONFIG ==========
 st.set_page_config(page_title="IGCSE/A-level Auto-Marker AI", layout="wide", page_icon="🤌")
-st.title("IGCSE/A-level Auto-Marker AI (V4) - Fixed CSV Logic")
+st.title("IGCSE/A-level Auto-Marker AI (V4) - Fixed CSV Logic & Display")
 st.write("Upload student's paper and mark scheme (images or PDF). This version includes improved CSV validation, normalization, and a more honest sureness score.")
 
 # ========= Sidebar: Uploads and Options ==========
@@ -88,7 +88,7 @@ def process_and_extract_text(uploaded_files, file_type="Paper"):
                 images_to_process.extend(pdf_images)
                 st.info(f"Converted {len(pdf_images)} pages from {filename}")
             elif ext in [".png", ".jpg", ".jpeg"]:
-                # file is an UploadedFile (BytesIO-like). PIL can open it.
+                # file is an UploadedFile (BytesIO-like. PIL can open it.)
                 img = Image.open(file)
                 images_to_process.append(img)
             else:
@@ -402,6 +402,8 @@ if st.button("✨ Mark Paper"):
                 
                 # 1. Define preferred column order for display
                 display_cols = ['Question_Number', 'Marks_Awarded', 'Maximum_Marks', 'Detailed_Feedback']
+
+                # Reorder the DataFrame columns for display
                 df_display = df[display_cols]
 
                 # 2. Display report
@@ -435,10 +437,10 @@ if st.button("✨ Mark Paper"):
                     unsafe_allow_html=True
                 )
                 
-                # 4. Show the reordered table
+                # 4. Show the reordered table using the custom-styled st.dataframe
                 try:
                     st.dataframe(
-                        df_display, # Use the reordered DataFrame
+                        df_display, # Use the reordered df_display
                         use_container_width=True,
                         height=500
                     )
