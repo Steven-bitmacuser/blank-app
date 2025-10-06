@@ -175,7 +175,7 @@ def get_marking_from_gemini(content):
 
 # --- Streamlit UI ---
 st.set_page_config(page_title="IGCSE and A-level Auto-Marker AI", layout="wide")
-st.title("👨‍🏫 IGCSE/A-level Auto-Marker AI")
+st.title("IGCSE/A-level Auto-Marker AI")
 st.write("Upload an exam paper and its mark scheme (Images or PDF) to get an automated, detailed marking report.")
 st.write("BEWARE!!! The images/PDFs needed to be horizontally aligned for better OCR results.")
 st.sidebar.header("Upload Files")
