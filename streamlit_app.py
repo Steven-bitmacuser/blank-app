@@ -1,16 +1,5 @@
 import streamlit as st
-try:
-    import google.generativeai as genai
-except ModuleNotFoundError:
-    # This might work if the path is slightly misconfigured but the package is installed
-    # It tries to access the 'generativeai' folder inside the 'google' namespace.
-    try:
-        from google import generativeai as genai
-    except ModuleNotFoundError as e:
-        import streamlit as st
-        st.error(f"FATAL ERROR: Failed to import the Google GenAI SDK. Please check your GitHub requirements.txt.")
-        st.exception(e)
-        st.stop()
+import google.generativeai as genai
 from PIL import Image
 import pytesseract
 import io
