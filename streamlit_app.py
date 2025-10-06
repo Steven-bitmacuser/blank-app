@@ -1,19 +1,19 @@
 import streamlit as st
-# The standard import works correctly when the API key is passed via secrets
-# because it forces the correct environment configuration.
-import google.generativeai as genai 
 
-# Fallback in case the new import fails for some reason
+# --- ULTIMATE FIX FOR NAMESPACE CONFLICT (Uses a fallback for robustness) ---
+# The standard import usually works when the environment is correctly configured with secrets.
 try:
     import google.generativeai as genai
 except ImportError:
+    # Fallback to the snake_case name, which sometimes bypasses namespace issues.
     try:
         import google_genai as genai
-    except ImportError:
+    except ImportError as e:
         st.error("FATAL ERROR: The Google GenAI SDK cannot be imported.")
-        st.info("Please ensure 'google-genai' is in your requirements.txt.")
+        st.info("Please ensure 'google-genai' is listed in your requirements.txt.")
+        st.exception(e)
         st.stop()
-
+# --- END OF ULTIMATE FIX ---
 
 from PIL import Image
 import pytesseract
@@ -26,11 +26,11 @@ import re # For cleaning up API output
 import time # For time-based uniqueness (optional, but good practice)
 
 # --- Configuration ---
-# 🔑 SECURITY FIX: The API key is now loaded securely from Streamlit Secrets.
-GEMINI_API_KEY_NAME = "GEMINI_API_KEY" # Key name in secrets.toml
+# 🔑 SECURITY FIX: Key is loaded from Streamlit Secrets later in the get_marking_from_gemini function.
+GEMINI_API_KEY_NAME = "GEMINI_API_KEY" # The key name must match the one in secrets.toml
 GEMINI_MODEL = 'gemini-2.5-flash' # Stable and fast model
 
-# --- Helper Functions: OCR and Extraction (No Changes) ---
+# --- Helper Functions: OCR and Extraction ---
 
 def process_and_extract_text(uploaded_files, file_type="Paper"):
     """
@@ -48,6 +48,7 @@ def process_and_extract_text(uploaded_files, file_type="Paper"):
 
             if file_extension == '.pdf':
                 st.info(f"Converting PDF: {file.name} to images...")
+                # convert_from_bytes requires poppler-utils installed on the system
                 pdf_images = convert_from_bytes(file.read())
                 images_to_process.extend(pdf_images)
                 st.success(f"Converted {len(pdf_images)} pages from {file.name}.")
@@ -68,6 +69,7 @@ def process_and_extract_text(uploaded_files, file_type="Paper"):
     # Perform Tesseract OCR on all collected images
     for i, image in enumerate(images_to_process):
         try:
+            # pytesseract requires tesseract-ocr installed on the system
             text = pytesseract.image_to_string(image)
             full_text += f"[Page {i+1} Text]\n" + text + "\n\n--- End of Page ---\n\n"
         except Exception as e:
@@ -86,16 +88,22 @@ def structure_content(paper_text, scheme_text):
         }
     return None
 
+# --- Sureness Score Function ---
+
 def calculate_sureness_score(df, raw_output):
-    """Calculates a simple score based on the quality and completeness of the CSV output."""
+    """
+    Calculates a simple score based on the quality and completeness of the CSV output.
+    """
     required_cols = ['Question_Number', 'Marks_Awarded', 'Maximum_Marks', 'Detailed_Feedback']
     max_score = 100
     score = max_score
 
+    # Penalty 1: Missing columns
     missing_cols = [col for col in required_cols if col not in df.columns]
     if missing_cols:
         score -= 40
         
+    # Penalty 2: Data type issues
     try:
         if 'Marks_Awarded' in df.columns and df['Marks_Awarded'].isnull().any():
              score -= 20
@@ -104,15 +112,17 @@ def calculate_sureness_score(df, raw_output):
     except Exception:
         score -= 20 
 
+    # Penalty 3: Low number of rows (suggests incomplete marking)
     if df.shape[0] < 3: 
         score -= 15
 
+    # Penalty 4: Output cleanup (if the raw output had non-CSV characters)
     if len(raw_output) > len(df.to_csv(index=False)) * 1.5:
         score -= 5
         
     return max(0, score) 
 
-# --- Helper Function: API Call (BIG CHANGE HERE) ---
+# --- Helper Function: API Call ---
 
 def get_marking_from_gemini(content):
     """Calls the Gemini API to get the structured marking data, reading key from st.secrets."""
@@ -159,6 +169,7 @@ def get_marking_from_gemini(content):
         
         response = model.generate_content(prompt)
         
+        # Clean the output (remove markdown fences like ```csv)
         cleaned_response = response.text.strip()
         cleaned_response = re.sub(r'```csv\s*', '', cleaned_response, flags=re.IGNORECASE)
         cleaned_response = re.sub(r'```', '', cleaned_response)
@@ -168,7 +179,7 @@ def get_marking_from_gemini(content):
         st.error(f"An error occurred while calling the Gemini API: {e}")
         return None
 
-# --- Streamlit UI (No Changes) ---
+# --- Streamlit UI ---
 st.set_page_config(page_title="IGCSE and A-level Auto-Marker AI", layout="wide")
 st.title("👨‍🏫 IGCSE/A-level Auto-Marker AI")
 st.write("Upload an exam paper and its mark scheme (Images or PDF) to get an automated, detailed marking report.")
@@ -182,7 +193,6 @@ if st.sidebar.button("✨ Mark Paper"):
     if not paper_files or not scheme_files:
         st.warning("Please upload both the paper and the mark scheme files.")
     else:
-        # NOTE: Removed the hardcoded key check here, it's now done in get_marking_from_gemini()
         
         with st.spinner('Reading and processing files (OCR)...'):
             student_paper_text = process_and_extract_text(paper_files, file_type="Paper")
@@ -198,6 +208,7 @@ if st.sidebar.button("✨ Mark Paper"):
                     csv_io = StringIO(marking_csv_data)
                     marking_df = pd.read_csv(csv_io)
                     
+                    # Ensure mark columns are numeric
                     marking_df['Marks_Awarded'] = pd.to_numeric(marking_df['Marks_Awarded'], errors='coerce')
                     marking_df['Maximum_Marks'] = pd.to_numeric(marking_df['Maximum_Marks'], errors='coerce')
 
@@ -205,6 +216,7 @@ if st.sidebar.button("✨ Mark Paper"):
 
                     st.header("Marking Report")
                     
+                    # --- Display Metrics ---
                     st.markdown("---")
                     col1, col2 = st.columns([1, 4])
                     col1.metric(
@@ -213,6 +225,7 @@ if st.sidebar.button("✨ Mark Paper"):
                         help="An internal metric estimating the quality and consistency of the AI's CSV output."
                     )
                     
+                    # Calculate totals safely
                     marking_df['Marks_Awarded'] = marking_df['Marks_Awarded'].fillna(0).astype(int)
                     marking_df['Maximum_Marks'] = marking_df['Maximum_Marks'].fillna(0).astype(int)
 
@@ -222,9 +235,11 @@ if st.sidebar.button("✨ Mark Paper"):
                     col2.metric(label="**Total Score**", value=f"{total_awarded} / {total_max}")
                     st.markdown("---")
                     
+                    # --- Display DataFrame ---
                     st.dataframe(
                         marking_df,
                         column_config={
+                            # Forces text in the 'Detailed_Feedback' column to wrap
                             "Detailed_Feedback": st.column_config.TextColumn(
                                 "Detailed Feedback", help="Explanation of marks awarded or not awarded.", width="large" 
                             ),
