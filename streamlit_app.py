@@ -1,39 +1,18 @@
 import streamlit as st
+# The standard import works correctly when the API key is passed via secrets
+# because it forces the correct environment configuration.
+import google.generativeai as genai 
 
-# --- CRITICAL FIX FOR STREAMLIT CLOUD NAMESPACE CONFLICT ---
-import sys
-import os
-
+# Fallback in case the new import fails for some reason
 try:
-    # 1. Try the standard import first (best practice)
     import google.generativeai as genai
 except ImportError:
-    # 2. If it fails, force Python to look in the exact package folder.
-    # This requires knowing the package structure, but is the most reliable workaround.
     try:
-        # Assuming the environment uses the standard venv path structure
-        # We need the path to the 'generativeai' module inside the 'google' folder
-        site_packages_path = next(p for p in sys.path if 'site-packages' in p)
-        gemini_path = os.path.join(site_packages_path, 'google', 'generativeai')
-        
-        if os.path.exists(gemini_path):
-            sys.path.append(gemini_path)
-            # This should now allow a direct import of the module by its name
-            # NOTE: For the final version, simply using 'import google.generativeai as genai' 
-            # might work after the sys.path modification, but we try a direct relative import 
-            # if the environment is hostile. The original name often magically works now.
-            import google.generativeai as genai
-            st.success("Module path fixed and GenAI SDK imported.")
-        else:
-            raise ImportError(f"Cannot find expected Gemini SDK path: {gemini_path}")
-            
-    except Exception as e:
-        # If the path fix fails, stop the app.
-        st.error("FATAL ERROR: Failed to import the Google GenAI SDK.")
-        st.info(f"Persistent environment issue. Details: {e}")
-        st.exception(e)
+        import google_genai as genai
+    except ImportError:
+        st.error("FATAL ERROR: The Google GenAI SDK cannot be imported.")
+        st.info("Please ensure 'google-genai' is in your requirements.txt.")
         st.stop()
-# --- END OF CRITICAL FIX ---
 
 
 from PIL import Image
@@ -41,19 +20,17 @@ import pytesseract
 import io
 import pandas as pd
 from pdf2image import convert_from_bytes
-# ... (rest of your imports and functions remain the same)
 import os
 from io import StringIO
 import re # For cleaning up API output
 import time # For time-based uniqueness (optional, but good practice)
 
 # --- Configuration ---
-# 🔑 SECURITY NOTE: This key is exposed in your code. For production, use Streamlit Secrets.
-# Please replace the placeholder with your actual key before deploying.
-HARDCODED_API_KEY = "REPLACE_WITH_YOUR_ACTUAL_GEMINI_API_KEY"
+# 🔑 SECURITY FIX: The API key is now loaded securely from Streamlit Secrets.
+GEMINI_API_KEY_NAME = "GEMINI_API_KEY" # Key name in secrets.toml
 GEMINI_MODEL = 'gemini-2.5-flash' # Stable and fast model
 
-# --- Helper Functions: OCR and Extraction ---
+# --- Helper Functions: OCR and Extraction (No Changes) ---
 
 def process_and_extract_text(uploaded_files, file_type="Paper"):
     """
@@ -66,13 +43,11 @@ def process_and_extract_text(uploaded_files, file_type="Paper"):
     images_to_process = []
     
     for file in uploaded_files:
-        # Use a temporary directory for safer file handling, though not strictly necessary here
         try:
             file_extension = os.path.splitext(file.name)[1].lower()
 
             if file_extension == '.pdf':
                 st.info(f"Converting PDF: {file.name} to images...")
-                # convert_from_bytes requires poppler-utils installed on the system
                 pdf_images = convert_from_bytes(file.read())
                 images_to_process.extend(pdf_images)
                 st.success(f"Converted {len(pdf_images)} pages from {file.name}.")
@@ -93,7 +68,6 @@ def process_and_extract_text(uploaded_files, file_type="Paper"):
     # Perform Tesseract OCR on all collected images
     for i, image in enumerate(images_to_process):
         try:
-            # pytesseract requires tesseract-ocr installed on the system
             text = pytesseract.image_to_string(image)
             full_text += f"[Page {i+1} Text]\n" + text + "\n\n--- End of Page ---\n\n"
         except Exception as e:
@@ -112,54 +86,50 @@ def structure_content(paper_text, scheme_text):
         }
     return None
 
-# --- Sureness Score Function ---
-
 def calculate_sureness_score(df, raw_output):
-    """
-    Calculates a simple score based on the quality and completeness of the CSV output.
-    """
+    """Calculates a simple score based on the quality and completeness of the CSV output."""
     required_cols = ['Question_Number', 'Marks_Awarded', 'Maximum_Marks', 'Detailed_Feedback']
     max_score = 100
     score = max_score
 
-    # Penalty 1: Missing columns
     missing_cols = [col for col in required_cols if col not in df.columns]
     if missing_cols:
         score -= 40
         
-    # Penalty 2: Data type issues (API didn't strictly follow CSV rules)
     try:
-        # Check if the columns exist first
         if 'Marks_Awarded' in df.columns and df['Marks_Awarded'].isnull().any():
              score -= 20
         if 'Maximum_Marks' in df.columns and df['Maximum_Marks'].isnull().any():
              score -= 20
     except Exception:
-        # Catch-all for unexpected column or data type errors
         score -= 20 
 
-    # Penalty 3: Low number of rows (suggests incomplete marking)
     if df.shape[0] < 3: 
         score -= 15
 
-    # Penalty 4: Output cleanup (if the raw output had non-CSV characters)
-    # Check if the output is significantly larger than the resulting CSV
     if len(raw_output) > len(df.to_csv(index=False)) * 1.5:
         score -= 5
         
     return max(0, score) 
 
-# --- Helper Function: API Call ---
+# --- Helper Function: API Call (BIG CHANGE HERE) ---
 
 def get_marking_from_gemini(content):
-    """Calls the Gemini API to get the structured marking data."""
-    api_key = HARDCODED_API_KEY 
-
-    if not api_key or api_key == "REPLACE_WITH_YOUR_ACTUAL_GEMINI_API_KEY":
-        st.error("Gemini API key is not configured in the script or is using the placeholder.")
+    """Calls the Gemini API to get the structured marking data, reading key from st.secrets."""
+    
+    # --- GET KEY SECURELY ---
+    try:
+        api_key = st.secrets[GEMINI_API_KEY_NAME]
+    except KeyError:
+        st.error(f"🔑 Gemini API key not found in Streamlit Secrets. Please add '{GEMINI_API_KEY_NAME}' to your secrets file.")
+        return None
+    
+    if not api_key:
+        st.error(f"🔑 Gemini API key is empty in Streamlit Secrets.")
         return None
         
     try:
+        # Configure the client using the securely retrieved key
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel(GEMINI_MODEL)
         
@@ -185,12 +155,10 @@ def get_marking_from_gemini(content):
         """
         st.info(f"🤖 Calling the Gemini API ({GEMINI_MODEL}) for marking... This might take a moment.")
         
-        # Adding a 1-second delay to avoid rate limit issues on rapid testing
         time.sleep(1) 
         
         response = model.generate_content(prompt)
         
-        # Clean the output (remove markdown fences like ```csv)
         cleaned_response = response.text.strip()
         cleaned_response = re.sub(r'```csv\s*', '', cleaned_response, flags=re.IGNORECASE)
         cleaned_response = re.sub(r'```', '', cleaned_response)
@@ -200,7 +168,7 @@ def get_marking_from_gemini(content):
         st.error(f"An error occurred while calling the Gemini API: {e}")
         return None
 
-# --- Streamlit UI ---
+# --- Streamlit UI (No Changes) ---
 st.set_page_config(page_title="IGCSE and A-level Auto-Marker AI", layout="wide")
 st.title("👨‍🏫 IGCSE/A-level Auto-Marker AI")
 st.write("Upload an exam paper and its mark scheme (Images or PDF) to get an automated, detailed marking report.")
@@ -214,11 +182,8 @@ if st.sidebar.button("✨ Mark Paper"):
     if not paper_files or not scheme_files:
         st.warning("Please upload both the paper and the mark scheme files.")
     else:
-        # Pre-check for API key before processing large files
-        if HARDCODED_API_KEY == "REPLACE_WITH_YOUR_ACTUAL_GEMINI_API_KEY":
-            st.error("Please set your Gemini API key in the `HARDCODED_API_KEY` variable at the top of the script.")
-            st.stop()
-            
+        # NOTE: Removed the hardcoded key check here, it's now done in get_marking_from_gemini()
+        
         with st.spinner('Reading and processing files (OCR)...'):
             student_paper_text = process_and_extract_text(paper_files, file_type="Paper")
             mark_scheme_text = process_and_extract_text(scheme_files, file_type="Mark Scheme")
@@ -233,17 +198,13 @@ if st.sidebar.button("✨ Mark Paper"):
                     csv_io = StringIO(marking_csv_data)
                     marking_df = pd.read_csv(csv_io)
                     
-                    # Ensure mark columns are numeric before calculating score
                     marking_df['Marks_Awarded'] = pd.to_numeric(marking_df['Marks_Awarded'], errors='coerce')
                     marking_df['Maximum_Marks'] = pd.to_numeric(marking_df['Maximum_Marks'], errors='coerce')
 
-                    # Calculate Sureness Score
-                    # A .copy() is used as a safety measure for the function input
                     sureness_score = calculate_sureness_score(marking_df.copy(), marking_csv_data)
 
                     st.header("Marking Report")
                     
-                    # Display Metrics
                     st.markdown("---")
                     col1, col2 = st.columns([1, 4])
                     col1.metric(
@@ -252,7 +213,6 @@ if st.sidebar.button("✨ Mark Paper"):
                         help="An internal metric estimating the quality and consistency of the AI's CSV output."
                     )
                     
-                    # Convert to numeric safely for totals (fillna(0) for corrupted rows)
                     marking_df['Marks_Awarded'] = marking_df['Marks_Awarded'].fillna(0).astype(int)
                     marking_df['Maximum_Marks'] = marking_df['Maximum_Marks'].fillna(0).astype(int)
 
@@ -262,15 +222,11 @@ if st.sidebar.button("✨ Mark Paper"):
                     col2.metric(label="**Total Score**", value=f"{total_awarded} / {total_max}")
                     st.markdown("---")
                     
-                    # Display the DataFrame with text wrapping enabled for feedback
                     st.dataframe(
                         marking_df,
                         column_config={
-                            # Forces text in the 'Detailed_Feedback' column to wrap
                             "Detailed_Feedback": st.column_config.TextColumn(
-                                "Detailed Feedback",
-                                help="Explanation of marks awarded or not awarded.",
-                                width="large" 
+                                "Detailed Feedback", help="Explanation of marks awarded or not awarded.", width="large" 
                             ),
                             "Question_Number": st.column_config.TextColumn(width="small"),
                             "Marks_Awarded": st.column_config.TextColumn(width="small"),
