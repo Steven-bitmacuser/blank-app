@@ -1,6 +1,6 @@
 streamlit
 google-genai
+pandas
 pillow
 pytesseract
-pandas
 pdf2image
