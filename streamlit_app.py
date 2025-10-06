@@ -1,17 +1,19 @@
 import streamlit as st
 
-# --- ModuleNotFoundError Fix for Streamlit Cloud ---
-# The standard 'import google.generativeai as genai' fails in this environment.
-# We use a try-except block to force the absolute import path, which is more reliable.
+# --- ModuleNotFoundError Fix for Streamlit Cloud (Third Attempt) ---
+# This bypasses the 'google' namespace entirely by importing the internal
+# name of the installed package and aliasing it to the expected 'genai'.
 try:
-    import google.generativeai as genai
+    # The internal package name is often the installation name with underscores.
+    # If the package is 'google-genai', the module might be 'google_genai'.
+    import google_genai as genai
 except ImportError:
+    # Fallback to the known module path if the snake_case import fails
     try:
         from google import generativeai as genai
     except ImportError as e:
-        # If both fail, we stop the app and display a critical error
-        st.error("FATAL ERROR: Failed to import the Google GenAI SDK.")
-        st.info("Please ensure 'google-genai' is listed in your requirements.txt and verify your Streamlit Cloud environment.")
+        # If all attempts fail, display a critical error
+        st.error("FATAL ERROR: Failed to import the Google GenAI SDK. Check requirements.txt and environment.")
         st.exception(e)
         st.stop()
 # --- End of Fix ---
