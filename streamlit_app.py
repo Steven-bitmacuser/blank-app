@@ -1,253 +1,395 @@
+# streamlit_app.py
 import streamlit as st
+import os
+import io
+import re
+import time
+import base64
+import shutil
+from io import StringIO
+from PIL import Image
+import pandas as pd
 
+# ==========  IMPORT GOOGLE GENERATIVE AI (official package) ==========
 try:
     import google.generativeai as genai
-except ImportError as e:
-    st.error("❌ The Google Generative AI SDK could not be imported.")
-    st.info("Please ensure 'google-generativeai' is in your requirements.txt (not 'google-genai').")
+except Exception as e:
+    # Friendly error: stops app with clear instruction if import fails
+    st.set_page_config(page_title="IGCSE/A-level Auto-Marker AI", layout="wide")
+    st.title("👨‍🏫 IGCSE/A-level Auto-Marker AI")
+    st.error("FATAL ERROR: The Google Generative AI SDK could not be imported.")
+    st.info("Make sure your requirements.txt contains: google-generativeai>=0.5.4")
     st.exception(e)
     st.stop()
 
+# ========== STREAMLIT PAGE CONFIG ==========
+st.set_page_config(page_title="IGCSE/A-level Auto-Marker AI", layout="wide", page_icon="🧠")
+st.title("👨‍🏫 IGCSE/A-level Auto-Marker AI (Improved)")
+st.write("Upload student's paper and mark scheme (images or PDF). This version includes improved CSV validation, normalization, and a more honest sureness score.")
 
-from PIL import Image
-import pytesseract
-import io
-import pandas as pd
+# ========= Sidebar: Uploads and Options ==========
+st.sidebar.header("1) Upload Files")
+file_types = ["png", "jpg", "jpeg", "pdf"]
+paper_files = st.sidebar.file_uploader("Student's Paper (Images / PDF)", type=file_types, accept_multiple_files=True)
+scheme_files = st.sidebar.file_uploader("Mark Scheme (Images / PDF)", type=file_types, accept_multiple_files=True)
+
+st.sidebar.header("2) Marking options")
+expected_full_marks = st.sidebar.number_input("Expected Full Marks for paper (enter exact integer)", min_value=1, value=75, step=1, help="Tell the app the paper's maximum total marks (e.g., 75). This helps validation.")
+auto_normalize = st.sidebar.checkbox("Auto-normalize totals if AI output's total differs", value=True, help="If the AI's 'Maximum_Marks' total doesn't equal Expected Full Marks, scale results to match.")
+debug_mode = st.sidebar.checkbox("Debug mode (show raw AI output & logs)", value=False)
+
+st.sidebar.header("3) System check (OCR prerequisites)")
+if shutil.which("tesseract"):
+    st.sidebar.success("✅ Tesseract installed")
+else:
+    st.sidebar.error("❌ Tesseract not found (system package missing)")
+
+if shutil.which("pdftoppm"):
+    st.sidebar.success("✅ Poppler (pdftoppm) installed")
+else:
+    st.sidebar.error("❌ Poppler not found (system package missing)")
+
+st.sidebar.markdown("---")
+st.sidebar.caption("If Tesseract/Poppler are not installed on Streamlit Cloud, please ensure packages.txt at repo root contains:\n```\ntesseract-ocr\npoppler-utils\n```")
+
+# ========== Helper: OCR & PDF to images ==========
 from pdf2image import convert_from_bytes
-import os
-from io import StringIO
-import re # For cleaning up API output
-import time # For time-based uniqueness (optional, but good practice)
-
-# --- Configuration ---
-# 🔑 SECURITY FIX: Key is loaded from Streamlit Secrets later in the get_marking_from_gemini function.
-GEMINI_API_KEY_NAME = "GEMINI_API_KEY" # The key name must match the one in secrets.toml
-GEMINI_MODEL = 'gemini-2.5-flash' # Stable and fast model
-
-# --- Helper Functions: OCR and Extraction ---
+import pytesseract
 
 def process_and_extract_text(uploaded_files, file_type="Paper"):
     """
-    Handles both image and PDF files, converting PDFs to images first, 
-    and then performing OCR on all pages/images. Requires system installations 
-    of tesseract-ocr and poppler-utils to work.
+    Convert PDFs -> images (pdf2image) and run pytesseract on images.
+    Returns concatenated text with page delimiters.
     """
     st.info(f"Processing {file_type} files...")
-    full_text = ""
     images_to_process = []
-    
+    full_text = ""
+
     for file in uploaded_files:
         try:
-            file_extension = os.path.splitext(file.name)[1].lower()
-
-            if file_extension == '.pdf':
-                st.info(f"Converting PDF: {file.name} to images...")
-                # convert_from_bytes requires poppler-utils installed on the system
-                pdf_images = convert_from_bytes(file.read())
+            filename = getattr(file, "name", "uploaded_file")
+            ext = os.path.splitext(filename)[1].lower()
+            if ext == ".pdf":
+                st.info(f"Converting PDF to images: {filename}")
+                # convert_from_bytes relies on poppler (pdftoppm) on system
+                pdf_bytes = file.read()
+                pdf_images = convert_from_bytes(pdf_bytes)
                 images_to_process.extend(pdf_images)
-                st.success(f"Converted {len(pdf_images)} pages from {file.name}.")
-            elif file_extension in ['.png', '.jpg', '.jpeg']:
-                images_to_process.append(Image.open(file))
+                st.info(f"Converted {len(pdf_images)} pages from {filename}")
+            elif ext in [".png", ".jpg", ".jpeg"]:
+                # file is an UploadedFile (BytesIO-like). PIL can open it.
+                img = Image.open(file)
+                images_to_process.append(img)
             else:
-                st.warning(f"Skipping unsupported file type: {file.name}")
-                continue
-
+                st.warning(f"Unsupported file type: {filename}. Skipped.")
         except Exception as e:
-            st.error(f"Error preparing file {file.name}. Ensure poppler-utils is installed for PDF: {e}")
+            st.error(f"Error preparing file {filename}. Ensure poppler-utils is installed for PDFs: {e}")
+            if debug_mode:
+                st.exception(e)
             return None
 
     if not images_to_process:
-        st.error(f"No usable content found in {file_type} files.")
+        st.error(f"No images/pages found in {file_type} files.")
         return None
 
-    # Perform Tesseract OCR on all collected images
-    for i, image in enumerate(images_to_process):
+    for i, img in enumerate(images_to_process):
         try:
-            # pytesseract requires tesseract-ocr installed on the system
-            text = pytesseract.image_to_string(image)
-            full_text += f"[Page {i+1} Text]\n" + text + "\n\n--- End of Page ---\n\n"
+            text = pytesseract.image_to_string(img)
+            full_text += f"[Page {i+1}]\n" + text + "\n\n"
         except Exception as e:
-            st.error(f"Error performing OCR on image {i+1}. Ensure tesseract-ocr is installed: {e}")
+            st.error(f"Error performing OCR on page {i+1}. Ensure tesseract-ocr installed and available in PATH: {e}")
+            if debug_mode:
+                st.exception(e)
             return None
-            
-    st.success(f"Successfully extracted text from {len(images_to_process)} pages of {file_type}.")
+
+    st.success(f"Extracted text from {len(images_to_process)} pages of {file_type}.")
     return full_text
 
-def structure_content(paper_text, scheme_text):
-    """Packages the extracted text into a dictionary for the API call."""
-    if paper_text and scheme_text:
-        return {
-            "student_paper_text": paper_text,
-            "mark_scheme_text": scheme_text
-        }
-    return None
+# ========== Helper: create a robust prompt for Gemini ==========
+GEMINI_MODEL = "gemini-2.5-flash"
 
-# --- Sureness Score Function ---
+def build_marking_prompt(student_text, scheme_text, expected_full_marks):
+    """
+    Build a strict prompt that forces CSV output and requires the sum of Maximum_Marks to equal expected_full_marks.
+    """
+    prompt = f"""
+You are a professional IGCSE/A-level examiner. Your job is to mark the student's paper strictly using the following mark scheme.
 
-def calculate_sureness_score(df, raw_output):
+REQUIREMENTS (MUST FOLLOW EXACTLY):
+1. Output pure CSV only. NO extra text, no explanations, no markdown fences.
+2. Columns MUST be: Question_Number,Marks_Awarded,Maximum_Marks,Detailed_Feedback
+3. Question_Number examples: 1, 2, 3a, 3b, 4(i), etc. Use the same labels that appear in the student's paper.
+4. Marks_Awarded and Maximum_Marks MUST be integers. Do not use ranges, text, or fractions.
+5. The sum of the Maximum_Marks column MUST equal exactly {expected_full_marks}.
+6. Do NOT include any "Total" or "Summary" rows. Only question rows.
+7. Detailed_Feedback must be 1-2 concise sentences explaining why marks were awarded or not.
+
+Now produce the CSV table only.
+
+[STUDENT'S PAPER]
+{student_text}
+
+[MARK SCHEME]
+{scheme_text}
+
+Produce the CSV now:
+"""
+    return prompt
+
+# ========== Helper: call Gemini and try to get a cleaned CSV string ==========
+def call_gemini_for_csv(content_dict, expected_full_marks, max_retries=2):
     """
-    Calculates a simple score based on the quality and completeness of the CSV output.
+    Calls Gemini with a strict CSV prompt, attempts to clean the response, and retries
+    with additional instructions if CSV is invalid or totals mismatch.
+    Returns: cleaned_response_text (string) or None, plus list of debug logs.
     """
-    required_cols = ['Question_Number', 'Marks_Awarded', 'Maximum_Marks', 'Detailed_Feedback']
+    logs = []
+    api_key_name = "GEMINI_API_KEY"
+    try:
+        api_key = st.secrets[api_key_name]
+    except KeyError:
+        st.error(f"🔑 Gemini API key not found in Streamlit Secrets. Add '{api_key_name}' to secrets.")
+        return None, ["Missing API key"]
+
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel(GEMINI_MODEL)
+
+    base_prompt = build_marking_prompt(content_dict["student_paper_text"], content_dict["mark_scheme_text"], expected_full_marks)
+
+    attempt = 0
+    last_response_text = None
+
+    while attempt <= max_retries:
+        attempt += 1
+        logs.append(f"Attempt {attempt}: sending prompt (length {len(base_prompt)}).")
+        try:
+            # Primary call
+            response = model.generate_content(base_prompt)
+            raw = response.text if hasattr(response, "text") else str(response)
+            logs.append(f"Raw response length: {len(raw)}")
+        except Exception as e:
+            logs.append(f"Call failed on attempt {attempt}: {e}")
+            if debug_mode:
+                st.exception(e)
+            return None, logs
+
+        # Clean: remove markdown fences if present
+        cleaned = re.sub(r'```(?:csv)?', '', raw, flags=re.IGNORECASE).strip()
+        last_response_text = cleaned
+
+        # Quick heuristic: does it look like CSV? (has commas + header)
+        if "Question_Number" in cleaned and "Marks_Awarded" in cleaned and "Maximum_Marks" in cleaned:
+            # return cleaned if passes basic check
+            logs.append("Basic CSV header found in AI output.")
+            return cleaned, logs
+        else:
+            logs.append("CSV header not found in AI output.")
+            # If not found and still retries left, craft a repair prompt
+            if attempt <= max_retries:
+                repair_prompt = f"""
+The table you previously returned is not valid CSV or misses the required columns.
+Remember: output ONLY CSV with EXACT columns:
+Question_Number,Marks_Awarded,Maximum_Marks,Detailed_Feedback
+Ensure the sum of Maximum_Marks equals exactly {expected_full_marks}.
+Return ONLY the CSV, nothing else.
+Here is your previous output (for reference):
+
+{cleaned}
+"""
+                base_prompt = repair_prompt  # next loop will send repair prompt
+                logs.append("Prepared repair prompt for next attempt.")
+                time.sleep(0.6)  # small delay before retry
+                continue
+            else:
+                logs.append("Max retries reached and no valid CSV produced.")
+                return cleaned, logs
+
+    return last_response_text, logs
+
+# ========== Helper: parse CSV text into DataFrame and validate ==========
+def parse_marking_csv_text(csv_text):
+    """
+    Tries to parse csv_text into pandas DataFrame.
+    Returns (df, parse_error_message or None)
+    """
+    try:
+        csv_io = StringIO(csv_text)
+        df = pd.read_csv(csv_io)
+        # Standardize column names
+        df.columns = [c.strip() for c in df.columns]
+        expected_cols = ['Question_Number', 'Marks_Awarded', 'Maximum_Marks', 'Detailed_Feedback']
+        if not all(col in df.columns for col in expected_cols):
+            missing = [c for c in expected_cols if c not in df.columns]
+            return None, f"Missing columns: {missing}"
+        # Ensure numeric where needed
+        df['Marks_Awarded'] = pd.to_numeric(df['Marks_Awarded'], errors='coerce')
+        df['Maximum_Marks'] = pd.to_numeric(df['Maximum_Marks'], errors='coerce')
+        return df, None
+    except Exception as e:
+        return None, f"CSV parse error: {e}"
+
+# ========== Improved sureness score ==========
+def calculate_sureness_score(df, raw_output, expected_full_marks):
+    """
+    Returns a 0-100 sureness score. More honest and penalizes:
+    - missing columns
+    - NaNs in marks
+    - total max mismatch
+    - very few rows
+    - extraneous characters in raw output
+    """
     max_score = 100
     score = max_score
+    req_cols = ['Question_Number', 'Marks_Awarded', 'Maximum_Marks', 'Detailed_Feedback']
 
-    # Penalty 1: Missing columns
-    missing_cols = [col for col in required_cols if col not in df.columns]
+    # Penalize missing columns
+    missing_cols = [c for c in req_cols if c not in df.columns]
     if missing_cols:
         score -= 40
-        
-    # Penalty 2: Data type issues
+
+    # Penalize NaNs in mark columns
     try:
-        if 'Marks_Awarded' in df.columns and df['Marks_Awarded'].isnull().any():
-             score -= 20
-        if 'Maximum_Marks' in df.columns and df['Maximum_Marks'].isnull().any():
-             score -= 20
+        if df['Marks_Awarded'].isnull().any():
+            score -= 15
+        if df['Maximum_Marks'].isnull().any():
+            score -= 15
     except Exception:
-        score -= 20 
+        score -= 20
 
-    # Penalty 3: Low number of rows (suggests incomplete marking)
-    if df.shape[0] < 3: 
-        score -= 15
+    # Penalize very few rows
+    if df.shape[0] < 3:
+        score -= 10
 
-    # Penalty 4: Output cleanup (if the raw output had non-CSV characters)
-    if len(raw_output) > len(df.to_csv(index=False)) * 1.5:
+    # Penalize mismatch in full marks
+    total_max = df['Maximum_Marks'].sum()
+    if total_max != expected_full_marks:
+        # larger penalty when difference is larger
+        diff = abs(total_max - expected_full_marks)
+        if diff <= 2:
+            score -= 5
+        elif diff <= 5:
+            score -= 12
+        else:
+            score -= 25
+
+    # Penalize raw text length vs CSV length (excess filler)
+    try:
+        csv_len = len(df.to_csv(index=False))
+        if len(raw_output) > csv_len * 1.6:
+            score -= 5
+    except Exception:
         score -= 5
-        
-    return max(0, score) 
 
-# --- Helper Function: API Call ---
+    return max(0, score)
 
-def get_marking_from_gemini(content):
-    """Calls the Gemini API to get the structured marking data, reading key from st.secrets."""
-    
-    # --- GET KEY SECURELY ---
-    try:
-        api_key = st.secrets[GEMINI_API_KEY_NAME]
-    except KeyError:
-        st.error(f"🔑 Gemini API key not found in Streamlit Secrets. Please add '{GEMINI_API_KEY_NAME}' to your secrets file.")
-        return None
-    
-    if not api_key:
-        st.error(f"🔑 Gemini API key is empty in Streamlit Secrets.")
-        return None
-        
-    try:
-        # Configure the client using the securely retrieved key
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(GEMINI_MODEL)
-        
-        prompt = f"""
-        **Role:** You are an expert IGCSE or A-level examiner. Your task is to mark a student's exam paper based on the provided mark scheme.
-
-        **Instructions:**
-        1.  Carefully read the student's answers from the "STUDENT'S PAPER" section.
-        2.  Compare each answer against the criteria in the "MARK SCHEME" section.
-        3.  Award marks strictly according to the mark scheme.
-        4.  For each question, provide a detailed breakdown.
-        5.  Your final output MUST be a table in CSV format with NO extra text or conversational filler.
-        6.  The table MUST have the following columns: 'Question_Number', 'Marks_Awarded', 'Maximum_Marks', 'Detailed_Feedback'.
-        7.  The 'Detailed_Feedback' column must explain WHY marks were awarded or not awarded.
-
-        **[STUDENT'S PAPER]**
-        {content['student_paper_text']}
-
-        **[MARK SCHEME]**
-        {content['mark_scheme_text']}
-
-        **Output (CSV Format):**
-        """
-        st.info(f"🤖 Calling the Gemini API ({GEMINI_MODEL}) for marking... This might take a moment.")
-        
-        time.sleep(1) 
-        
-        response = model.generate_content(prompt)
-        
-        # Clean the output (remove markdown fences like ```csv)
-        cleaned_response = response.text.strip()
-        cleaned_response = re.sub(r'```csv\s*', '', cleaned_response, flags=re.IGNORECASE)
-        cleaned_response = re.sub(r'```', '', cleaned_response)
-        
-        return cleaned_response
-    except Exception as e:
-        st.error(f"An error occurred while calling the Gemini API: {e}")
-        return None
-
-# --- Streamlit UI ---
-st.set_page_config(page_title="IGCSE and A-level Auto-Marker AI", layout="wide")
-st.title("IGCSE/A-level Auto-Marker AI")
-st.write("Upload an exam paper and its mark scheme (Images or PDF) to get an automated, detailed marking report.")
-st.write("BEWARE!!! The images/PDFs needed to be horizontally aligned for better OCR results.")
-st.sidebar.header("Upload Files")
-file_types = ["png", "jpg", "jpeg", "pdf"] 
-paper_files = st.sidebar.file_uploader("Upload Student's Paper (Images/PDF)", type=file_types, accept_multiple_files=True)
-scheme_files = st.sidebar.file_uploader("Upload Mark Scheme (Images/PDF)", type=file_types, accept_multiple_files=True)
-
-if st.sidebar.button("✨ Mark Paper"):
+# ========== Streamlit UI: main action ==========
+if st.button("✨ Mark Paper"):
     if not paper_files or not scheme_files:
-        st.warning("Please upload both the paper and the mark scheme files.")
+        st.warning("Please upload both the student's paper and the mark scheme.")
     else:
-        
-        with st.spinner('Reading and processing files (OCR)...'):
+        with st.spinner("Performing OCR on uploaded files..."):
             student_paper_text = process_and_extract_text(paper_files, file_type="Paper")
             mark_scheme_text = process_and_extract_text(scheme_files, file_type="Mark Scheme")
-        
-        if student_paper_text and mark_scheme_text:
-            structured_content = structure_content(student_paper_text, mark_scheme_text)
-            marking_csv_data = get_marking_from_gemini(structured_content) 
-            
-            if marking_csv_data:
-                st.success("🎉 Marking Complete!")
+
+        if not student_paper_text or not mark_scheme_text:
+            st.error("OCR failed or returned no text. See sidebar system checks or enable debug mode for more info.")
+        else:
+            structured = {
+                "student_paper_text": student_paper_text,
+                "mark_scheme_text": mark_scheme_text
+            }
+            st.info("Calling the Gemini model to produce the CSV marking table...")
+
+            raw_csv_text, call_logs = call_gemini_for_csv(structured, expected_full_marks, max_retries=2)
+
+            if debug_mode:
+                st.subheader("Call Logs")
+                for log in call_logs:
+                    st.text(log)
+
+            if not raw_csv_text:
+                st.error("The AI did not return a usable CSV. See logs above.")
+            else:
+                # Show raw output (collapsible)
+                with st.expander("Raw AI Output (click to expand)", expanded=debug_mode):
+                    st.code(raw_csv_text[:5000])  # show up to 5000 chars
+
+                df, parse_err = parse_marking_csv_text(raw_csv_text)
+                if parse_err:
+                    st.warning(f"AI output couldn't be parsed as CSV: {parse_err}")
+                    if debug_mode:
+                        st.subheader("Raw output for debugging")
+                        st.text_area("Raw Output", raw_csv_text, height=300)
+                    st.stop()
+
+                # Coerce numeric and fill NaN marks with 0 to avoid errors
+                df['Marks_Awarded'] = df['Marks_Awarded'].fillna(0).astype(float)
+                df['Maximum_Marks'] = df['Maximum_Marks'].fillna(0).astype(float)
+
+                # Totals
+                total_awarded = df['Marks_Awarded'].sum()
+                total_max = df['Maximum_Marks'].sum()
+
+                # If totals mismatch expected full marks, offer options
+                if total_max != expected_full_marks:
+                    st.warning(f"AI reported total maximum marks = {int(total_max)} but expected = {int(expected_full_marks)}.")
+                    if auto_normalize:
+                        # scale factor for Maximum_Marks and Marks_Awarded proportionally
+                        if total_max > 0:
+                            factor = expected_full_marks / total_max
+                            df['Maximum_Marks_Original'] = df['Maximum_Marks']
+                            df['Marks_Awarded_Original'] = df['Marks_Awarded']
+                            df['Maximum_Marks'] = (df['Maximum_Marks'] * factor).round().astype(int)
+                            df['Marks_Awarded'] = (df['Marks_Awarded'] * factor).round().astype(int)
+                            total_awarded = int(df['Marks_Awarded'].sum())
+                            total_max = int(df['Maximum_Marks'].sum())
+                            st.success(f"Auto-normalized marks to match expected full marks ({expected_full_marks}).")
+                        else:
+                            st.error("AI reported total maximum marks equal to 0; cannot normalize.")
+                    else:
+                        st.info("Disable 'Auto-normalize' in sidebar to avoid automatic scaling. Consider re-running with debug mode to inspect raw AI output.")
+                
+                # Final numeric coercion (safe)
+                df['Marks_Awarded'] = pd.to_numeric(df['Marks_Awarded'], errors='coerce').fillna(0).astype(int)
+                df['Maximum_Marks'] = pd.to_numeric(df['Maximum_Marks'], errors='coerce').fillna(0).astype(int)
+
+                # Calculate sureness score
+                sureness = calculate_sureness_score(df.copy(), raw_csv_text, expected_full_marks)
+
+                # Display report
+                st.header("Marking Report")
+                col1, col2 = st.columns([1, 3])
+                col1.metric("Sureness Score", f"{sureness}/100")
+                col2.metric("Total Score", f"{int(df['Marks_Awarded'].sum())} / {int(df['Maximum_Marks'].sum())}")
+
+                st.markdown("---")
+                # Show table with wrap for feedback
                 try:
-                    csv_io = StringIO(marking_csv_data)
-                    marking_df = pd.read_csv(csv_io)
-                    
-                    # Ensure mark columns are numeric
-                    marking_df['Marks_Awarded'] = pd.to_numeric(marking_df['Marks_Awarded'], errors='coerce')
-                    marking_df['Maximum_Marks'] = pd.to_numeric(marking_df['Maximum_Marks'], errors='coerce')
-
-                    sureness_score = calculate_sureness_score(marking_df.copy(), marking_csv_data)
-
-                    st.header("Marking Report")
-                    
-                    # --- Display Metrics ---
-                    st.markdown("---")
-                    col1, col2 = st.columns([1, 4])
-                    col1.metric(
-                        label="**Sureness Score**", 
-                        value=f"{sureness_score}/100", 
-                        help="An internal metric estimating the quality and consistency of the AI's CSV output."
-                    )
-                    
-                    # Calculate totals safely
-                    marking_df['Marks_Awarded'] = marking_df['Marks_Awarded'].fillna(0).astype(int)
-                    marking_df['Maximum_Marks'] = marking_df['Maximum_Marks'].fillna(0).astype(int)
-
-                    total_awarded = marking_df['Marks_Awarded'].sum()
-                    total_max = marking_df['Maximum_Marks'].sum()
-                    
-                    col2.metric(label="**Total Score**", value=f"{total_awarded} / {total_max}")
-                    st.markdown("---")
-                    
-                    # --- Display DataFrame ---
                     st.dataframe(
-                        marking_df,
-                        column_config={
-                            # Forces text in the 'Detailed_Feedback' column to wrap
-                            "Detailed_Feedback": st.column_config.TextColumn(
-                                "Detailed Feedback", help="Explanation of marks awarded or not awarded.", width="large" 
-                            ),
-                            "Question_Number": st.column_config.TextColumn(width="small"),
-                            "Marks_Awarded": st.column_config.TextColumn(width="small"),
-                            "Maximum_Marks": st.column_config.TextColumn(width="small"),
-                        },
-                        height=500, 
-                        use_container_width=True
+                        df,
+                        use_container_width=True,
+                        height=500
                     )
+                except Exception:
+                    st.write(df)
 
-                except pd.errors.ParserError:
-                    st.error("Could not parse the marking data into a table. The AI output was not clean CSV.")
-                    st.subheader("Raw Gemini Output for Debugging:")
-                    st.text_area("Raw Output", marking_csv_data, height=300)
-                except Exception as e:
-                    st.error(f"An unexpected error occurred during report generation: {e}")
+                # Provide raw outputs & download options
+                st.markdown("---")
+                st.subheader("Download Results")
+                csv_bytes = df.to_csv(index=False).encode("utf-8")
+                b64 = base64.b64encode(csv_bytes).decode()
+                st.markdown(f"[Download CSV](data:file/csv;base64,{b64})")
+
+                if debug_mode:
+                    st.subheader("Debug information")
+                    st.write("Call logs:")
+                    for l in call_logs:
+                        st.text(l)
+                    st.write("Raw AI output preview:")
+                    st.code(raw_csv_text[:4000])
+
+                st.success("Marking complete.")
+
+# ========== Helpful footer ==========
+st.markdown("---")
+st.caption("Notes: This app uses OCR (pytesseract + pdf2image). For reliable OCR on Streamlit Cloud, ensure packages.txt at repo root includes tesseract-ocr and poppler-utils. If system dependencies are missing, results may fail. The app attempts to make the AI output reliable via stricter prompts, retries, and optional normalization.")
