@@ -1,5 +1,5 @@
 streamlit
-google-genai
+google-genai==1.41.0
 pillow
 pytesseract
 pandas
