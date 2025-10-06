@@ -16,7 +16,7 @@ try:
 except Exception as e:
     # Friendly error: stops app with clear instruction if import fails
     st.set_page_config(page_title="IGCSE/A-level Auto-Marker AI", layout="wide")
-    st.title("👨‍🏫 IGCSE/A-level Auto-Marker AI")
+    st.title("IGCSE/A-level Auto-Marker AI")
     st.error("FATAL ERROR: The Google Generative AI SDK could not be imported.")
     st.info("Make sure your requirements.txt contains: google-generativeai>=0.5.4")
     st.exception(e)
@@ -24,7 +24,7 @@ except Exception as e:
 
 # ========== STREAMLIT PAGE CONFIG ==========
 st.set_page_config(page_title="IGCSE/A-level Auto-Marker AI", layout="wide", page_icon="🧠")
-st.title("👨‍🏫 IGCSE/A-level Auto-Marker AI (Improved)")
+st.title("IGCSE/A-level Auto-Marker AI (V4)")
 st.write("Upload student's paper and mark scheme (images or PDF). This version includes improved CSV validation, normalization, and a more honest sureness score.")
 
 # ========= Sidebar: Uploads and Options ==========
